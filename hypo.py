@@ -1,0 +1,121 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+
+# 1. Konfigurace
+st.set_page_config(page_title="Hypo Analytik 2026", layout="wide")
+
+st.markdown("""
+    <style>
+    div[data-testid="stMetric"] {
+        background-color: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 15px;
+        border-radius: 10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Funkce pro výpočet anuity
+def vypocitej_anuitu(dluh, rocni_urok, mesice_zbyva):
+    if dluh <= 0 or mesice_zbyva <= 0: return 0
+    r = (rocni_urok / 100) / 12
+    if r == 0: return dluh / mesice_zbyva
+    return dluh * (r * (1 + r)**mesice_zbyva) / ((1 + r)**mesice_zbyva - 1)
+
+st.title("🏠 Hypo Strategie & Smart Report")
+
+# --- SIDEBAR: VSTUPY ---
+with st.sidebar:
+    st.header("1️⃣ Základní parametry")
+    castka_uvod = st.number_input("Výše úvěru (Kč):", value=5000000, step=100000)
+    puvodni_roky = st.number_input("Celková splatnost (roky):", value=30, min_value=1)
+    
+    st.divider()
+    st.header("📅 Plán fixací")
+    fixace_list = []
+    akumulovany_cas = 0
+    
+    for i in range(1, 6):
+        zbiva = puvodni_roky - akumulovany_cas
+        if zbiva <= 0: break
+        with st.expander(f"Fixace č. {i}", expanded=(i==1)):
+            c1, c2 = st.columns(2)
+            u = c1.number_input(f"Úrok (%)", value=5.49 if i==1 else 3.5, key=f"u{i}")
+            d = c2.number_input(f"Na let", value=min(5, zbiva), min_value=1, max_value=zbiva, key=f"d{i}")
+            m = st.number_input(f"Mimořádný vklad (Kč)", value=0, key=f"m{i}")
+            fixace_list.append({"urok": u, "let": d, "mimo": m})
+            akumulovany_cas += d
+
+# --- LOGIKA SIMULACE (FUNKCE PRO OBA SCÉNÁŘE) ---
+def spustit_simulaci(pouzit_vklady):
+    dluh = castka_uvod
+    mesice_zbyva = puvodni_roky * 12
+    celkovy_urok = 0
+    mesic_global = 0
+    vystup_data = []
+
+    for idx, f in enumerate(fixace_list):
+        if dluh <= 0.01: break
+        splatka = vypocitej_anuitu(dluh, f['urok'], mesice_zbyva)
+        r_mesic = (f['urok'] / 100) / 12
+        
+        for m in range(f['let'] * 12):
+            if dluh <= 0.01: break
+            u_cast = dluh * r_mesic
+            dluh -= (splatka - u_cast)
+            celkovy_urok += u_cast
+            mesic_global += 1
+            mesice_zbyva -= 1
+            if pouzit_vklady:
+                vystup_data.append({"Měsíc": mesic_global, "Zůstatek": max(0, dluh), "Splátka": splatka, "Fixace": f"Fixace č. {idx+1}"})
+        
+        if pouzit_vklady:
+            dluh -= f['mimo']
+
+    # Doplatek do konce
+    if dluh > 0.01 and mesice_zbyva > 0:
+        posledni_u = fixace_list[-1]['urok']
+        while dluh > 0.01 and mesice_zbyva > 0:
+            splatka = vypocitej_anuitu(dluh, posledni_u, mesice_zbyva)
+            u_cast = dluh * (posledni_u/100/12)
+            dluh -= (splatka - u_cast)
+            celkovy_urok += u_cast
+            mesic_global += 1
+            mesice_zbyva -= 1
+            if pouzit_vklady:
+                vystup_data.append({"Měsíc": mesic_global, "Zůstatek": max(0, dluh), "Splátka": splatka, "Fixace": "Doplatek"})
+                
+    return vystup_data, celkovy_urok, mesic_global
+
+# Spuštění
+data_hlavni, urok_vklady, stop_mesic = spustit_simulaci(pouzit_vklady=True)
+_, urok_bez, _ = spustit_simulaci(pouzit_vklady=False)
+
+df = pd.DataFrame(data_hlavni)
+
+# --- ZOBRAZENÍ ---
+if not df.empty:
+    uspora_casu = round(puvodni_roky - (stop_mesic/12), 1)
+    uspora_penize = int(urok_bez - urok_vklady)
+    
+    st.subheader("🎯 Vaše strategie v číslech:")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Přeplatek celkem", f"{int(urok_vklady):,} Kč".replace(",", " "))
+    c2.metric("Ušetříte na úrocích", f"{uspora_penize:,} Kč".replace(",", " "))
+    c3.metric("Nová splatnost", f"{round(stop_mesic/12, 1)} let")
+    c4.metric("Ušetříte času", f"{uspora_casu} let", delta=f"{int(uspora_casu*12)} měs.")
+
+    st.write("### 📅 Jízdní řád splátek")
+    prehled = []
+    for idx, f in enumerate(fixace_list):
+        label = f"Fixace č. {idx+1}"
+        row = df[df['Fixace'] == label]
+        if not row.empty:
+            prehled.append({"Období": label, "Úrok": f"{f['urok']}%", "Splátka": f"{int(row['Splátka'].iloc[0]):,} Kč".replace(",", " "), "Vklad": f"{f['mimo']:,} Kč"})
+    st.table(pd.DataFrame(prehled))
+
+    st.divider()
+    fig = px.area(df, x="Měsíc", y="Zůstatek", color="Fixace", title="Vývoj dluhu")
+    st.plotly_chart(fig, use_container_width=True)
